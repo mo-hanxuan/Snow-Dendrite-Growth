@@ -1,4 +1,6 @@
 """
+    use hierachical data structure to boot the bandwidth utilization
+
     Here the phase field model of dendritic solidification refer to this thesis:
         Kobayashi, R. (1993), "Modeling and numerical simulations of dendritic crystal growth." 
         Physica D 63(3-4): 410-423
@@ -7,18 +9,72 @@
     hence can give a more beautiful morphology
 """
 
+from turtle import TPen
 import taichi as ti
 import numpy as np
 
 ti.init(arch=ti.cuda)
 
-n = 1024
-phi = ti.field(dtype=ti.float64, shape=(n, n))
-phiNew = ti.field(dtype=ti.float64, shape=(n, n))
-tp = ti.field(dtype=ti.float64, shape=(n, n))  # temperature
-tpNew = ti.field(dtype=ti.float64, shape=(n, n))
-dEnergy_dGrad_term1 = ti.Vector.field(2, ti.float64, shape=(n, n))  # the firat term of the energy-derivative with respect to phi_grad
-epsilons = ti.field(dtype=ti.float64, shape=(n, n))
+
+def snodes_field(n, spatialDim=2, blockSize=8, 
+                 dtype=ti.float64, mod="bitmasked"):
+    """
+        creat a field composed of snodes,
+        the field has nested structure, 
+        which means the field has multiple blocks and each block has multiple pixels,
+
+        the hierachical structure (or blockwise structure) means that 
+        when you read the neighbor element,
+        it has higher possibility that the neighbor element has been loaded from memory, 
+        thus improve bandwith utilization.
+
+        spatialDim specifies the spatial dimension of the field
+    """
+    field = ti.field(dtype=dtype)
+    ti_ijk = {1: ti.i, 2: ti.ij, 3: ti.ijk}[spatialDim]
+    blocks = ti.root.pointer(ti_ijk, [n // blockSize for _ in range(spatialDim)])
+    if mod == "bitmasked":
+        pixels = blocks.bitmasked(ti_ijk, [blockSize for _ in range(spatialDim)])
+    elif mod == "dense":
+        pixels = blocks.dense(ti_ijk, [blockSize for _ in range(spatialDim)])
+    else:
+        raise ValueError("for function snodes_field, args mod should be 'bitmasked' or 'dense'")
+    pixels.place(field)
+    return field
+
+
+def snodes_vector_field(n, spatialDim=2, 
+                        vecSize=2, blockSize=8, 
+                        dtype=ti.float64, 
+                        mod="bitmasked"):
+    """
+        creat a vector field composed of snodes,
+        the field has nested/hierarchical structure, 
+        which means the field has multiple blocks and each block has multiple pixels,
+
+        spatialDim specifies the spatial dimension of the field
+        vecSize means the dimension of each elemental vector
+    """
+    field = ti.Vector.field(vecSize, dtype=dtype)
+    ti_ijk = {1: ti.i, 2: ti.ij, 3: ti.ijk}[spatialDim]
+    blocks = ti.root.pointer(ti_ijk, [n // blockSize for _ in range(spatialDim)])
+    if mod == "bitmasked":
+        pixels = blocks.bitmasked(ti_ijk, [blockSize for _ in range(spatialDim)])
+    elif mod == "dense":
+        pixels = blocks.dense(ti_ijk, [blockSize for _ in range(spatialDim)])
+    else:
+        raise ValueError("for function snodes_vector_field, args mod should be 'bitmasked' or 'dense'")
+    pixels.place(field)
+    return field
+
+
+n = 512  # compute on n x n field
+phi = snodes_field(n)
+phiNew = snodes_field(n)
+tp = snodes_field(n)  # temperature
+tpNew = snodes_field(n)
+epsilons = snodes_field(n)
+dEnergy_dGrad_term1 = snodes_vector_field(n, vecSize=2)  # the firat term of the energy-derivative with respect to phi_grad
 
 dx = 0.03
 dt = 3.e-4
@@ -34,6 +90,7 @@ gamma = 10.0
 teq = 1.0  # temperature of equilibrium
 mo = 1. / tau  # mobility
 angle0 = 0.  # np.pi / 18. * 1.5
+initialTemperature = 0.
 
 
 @ti.func
@@ -48,12 +105,13 @@ def sumVec(vec):
 def initializeVariables():
     radius = 1.
     center = ti.Vector([n//2, n//2])
-    for i, j in phi:
+    ### activate all snodes
+    for i, j in ti.ndrange(n, n):
         if sumVec((ti.Vector([i, j]) - center)**2) < radius**2:
             phi[i, j] = 1.
         else:
             phi[i, j] = 0.
-        tp[i, j] = 0.  # temperature
+        tp[i, j] = initialTemperature  # temperature
 
 
 @ti.func
@@ -77,6 +135,7 @@ def divergence_dEnergy_dGrad_term1(i, j):
 
 @ti.kernel
 def get_epsilons_and_dEnergy_dGrad_term1():
+    pi = 3.141592653589793
     for i, j in phi:
         im, jm, ip, jp = neighbor_index(i, j)
         grad = ti.Vector([
@@ -90,6 +149,7 @@ def get_epsilons_and_dEnergy_dGrad_term1():
             epsilons[i, j] = epsilonbar * (1. + delta * ti.cos(anisoMod * (angle - angle0)))
         else:
             angle = ti.atan2(grad[1], grad[0])
+            angle = angle + 2 * pi if angle < 0 else angle
             epsilon = epsilonbar * (1. + delta * ti.cos(anisoMod * (angle - angle0)))
             epsilons[i, j] = epsilon
             dAngle_dGradX = -grad[1] / gradNorm

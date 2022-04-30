@@ -1,5 +1,7 @@
 """
-    solving Phase Field equation using SNodes in taichi
+    use snodes to boost the computation
+    only activate the nodes near where changes happen
+
     Here the phase field model of dendritic solidification refer to this thesis:
         Kobayashi, R. (1993), "Modeling and numerical simulations of dendritic crystal growth." 
         Physica D 63(3-4): 410-423
@@ -8,33 +10,34 @@
     hence can give a more beautiful morphology
 """
 
+from turtle import TPen
 import taichi as ti
 import numpy as np
 
 ti.init(arch=ti.cuda)
 
 
-def snodes_field(n, spatialDim=2, 
-                 blockSize=8, 
-                 dtype=ti.float64, 
-                 mod="bitmasked"):
+def snodes_field(n, spatialDim=2, blockSize=8, 
+                 dtype=ti.float64, mod="bitmasked"):
     """
         creat a field composed of snodes,
         the field has nested structure, 
         which means the field has multiple blocks and each block has multiple pixels,
 
-        the hierachical structure (or blockwise structure) means that when you read the neighbor element,
+        the hierachical structure (or blockwise structure) means that 
+        when you read the neighbor element,
         it has higher possibility that the neighbor element has been loaded from memory, 
         thus improve bandwith utilization.
 
         spatialDim specifies the spatial dimension of the field
     """
     field = ti.field(dtype=dtype)
-    blocks = ti.root.pointer(ti.ij, [n // blockSize for _ in range(spatialDim)])
+    ti_ijk = {1: ti.i, 2: ti.ij, 3: ti.ijk}[spatialDim]
+    blocks = ti.root.pointer(ti_ijk, [n // blockSize for _ in range(spatialDim)])
     if mod == "bitmasked":
-        pixels = blocks.bitmasked(ti.ij, [blockSize for _ in range(spatialDim)])
+        pixels = blocks.bitmasked(ti_ijk, [blockSize for _ in range(spatialDim)])
     elif mod == "dense":
-        pixels = blocks.dense(ti.ij, [blockSize for _ in range(spatialDim)])
+        pixels = blocks.dense(ti_ijk, [blockSize for _ in range(spatialDim)])
     else:
         raise ValueError("for function snodes_field, args mod should be 'bitmasked' or 'dense'")
     pixels.place(field)
@@ -54,26 +57,29 @@ def snodes_vector_field(n, spatialDim=2,
         vecSize means the dimension of each elemental vector
     """
     field = ti.Vector.field(vecSize, dtype=dtype)
-    blocks = ti.root.pointer(ti.ij, [n // blockSize for _ in range(spatialDim)])
+    ti_ijk = {1: ti.i, 2: ti.ij, 3: ti.ijk}[spatialDim]
+    blocks = ti.root.pointer(ti_ijk, [n // blockSize for _ in range(spatialDim)])
     if mod == "bitmasked":
-        pixels = blocks.bitmasked(ti.ij, [blockSize for _ in range(spatialDim)]).dense(ti.ij, vecSize)
+        pixels = blocks.bitmasked(ti_ijk, [blockSize for _ in range(spatialDim)])
     elif mod == "dense":
-        pixels = blocks.bitmasked(ti.ij, [blockSize for _ in range(spatialDim)]).dense(ti.ij, vecSize)
+        pixels = blocks.dense(ti_ijk, [blockSize for _ in range(spatialDim)])
     else:
         raise ValueError("for function snodes_vector_field, args mod should be 'bitmasked' or 'dense'")
     pixels.place(field)
     return field
 
 
-n = 512  # compute on n x n field
+n = 1024  # compute on n x n field
 phi = snodes_field(n)
 phiNew = snodes_field(n)
+phiRate = snodes_field(n)
+phiActivated = snodes_field(n, dtype=ti.f16)
 tp = snodes_field(n)  # temperature
 tpNew = snodes_field(n)
+tpRate = snodes_field(n)
+tpActivated = snodes_field(n, dtype=ti.f16)
 epsilons = snodes_field(n)
-dEnergy_dGrad_term1 = snodes_vector_field(n, vecSize=2)
-ij = ti.field(ti.i32, shape=(n, n))
-# dEnergy_dGrad_term1 = ti.Vector.field(2, ti.float64, shape=(n, n))  # the firat term of the energy-derivative with respect to phi_grad
+dEnergy_dGrad_term1 = snodes_vector_field(n, vecSize=2)  # the firat term of the energy-derivative with respect to phi_grad
 
 dx = 0.03
 dt = 3.e-4
@@ -104,12 +110,13 @@ def sumVec(vec):
 def initializeVariables():
     radius = 1.
     center = ti.Vector([n//2, n//2])
-    for i, j in ij:
+    ### activate all snodes
+    for i, j in ti.ndrange(n, n):
         if sumVec((ti.Vector([i, j]) - center)**2) < radius**2:
             phi[i, j] = 1.
         # else:
         #     phi[i, j] = 0.
-        tp[i, j] = initialTemperature  # temperature
+        # tp[i, j] = initialTemperature  # temperature
 
 
 @ti.func
@@ -189,51 +196,109 @@ def evolution():
                 grad_epsilon2[1] * grad_phi[1] + \
                 epsilons[i, j]**2 * lapla_phi
 
-        phiRate = mo * (chemicalForce + gradForce_term1 + gradForce_term2)
-        phiNew[i, j] = phi[i, j] + phiRate * dt
+        phiRate[i, j] = mo * (chemicalForce + gradForce_term1 + gradForce_term2)
+        phiNew[i, j] = phi[i, j] + phiRate[i, j] * dt
 
         ### update the temperature
-        tpRate = lapla_tp + k * phiRate
-        tpNew[i, j] = tp[i, j] + tpRate * dt
+        tpRate[i, j] = lapla_tp + k * phiRate[i, j]
+        tpNew[i, j] = tp[i, j] + tpRate[i, j] * dt
+
+
+@ti.kernel
+def phi_activate_neighbors():
+    for i, j in phi:
+        if abs(phiRate[i, j]) > 1.e-3:
+            imm = (i - 2) % n
+            im = (i - 1) % n
+            ip = (i + 1) % n
+            ipp = (i + 2) % n
+            jmm = (j - 2) % n
+            jm = (j - 1) % n
+            jp = (j + 1) % n
+            jpp = (j + 2) % n
+
+            mat = ti.Matrix([
+                [imm, jmm], [imm, jm], [imm, j], [imm, jp], [imm, jpp],
+                [im , jmm], [im , jm], [im , j], [im , jp], [im , jpp],
+                [i  , jmm], [i  , jm], [i  , j], [i  , jp], [i  , jpp],
+                [ip , jmm], [ip , jm], [ip , j], [ip , jp], [ip , jpp],
+                [ipp, jmm], [ipp, jm], [ipp, j], [ipp, jp], [ipp, jpp],
+            ])
+            for k in ti.static(range(mat.n)):
+                phi[mat[k, 0], mat[k, 1]] = phi[mat[k, 0], mat[k, 1]]
+                tp[mat[k, 0], mat[k, 1]] = tp[mat[k, 0], mat[k, 1]]
+
+
+@ti.kernel
+def tp_activate_neighbors():
+    for i, j in tp:
+        if abs(tpRate[i, j]) > 1.e-3:
+            imm = (i - 2) % n
+            im = (i - 1) % n
+            ip = (i + 1) % n
+            ipp = (i + 2) % n
+            jmm = (j - 2) % n
+            jm = (j - 1) % n
+            jp = (j + 1) % n
+            jpp = (j + 2) % n
+
+            mat = ti.Matrix([
+                [imm, jmm], [imm, jm], [imm, j], [imm, jp], [imm, jpp],
+                [im , jmm], [im , jm], [im , j], [im , jp], [im , jpp],
+                [i  , jmm], [i  , jm], [i  , j], [i  , jp], [i  , jpp],
+                [ip , jmm], [ip , jm], [ip , j], [ip , jp], [ip , jpp],
+                [ipp, jmm], [ipp, jm], [ipp, j], [ipp, jp], [ipp, jpp],
+            ])
+            for k in ti.static(range(mat.n)):
+                tp[mat[k, 0], mat[k, 1]] = tp[mat[k, 0], mat[k, 1]]
+                phi[mat[k, 0], mat[k, 1]] = phi[mat[k, 0], mat[k, 1]]
+
+
+@ti.kernel
+def show_phi_activated():
+    for i, j in phi:
+        phiActivated[i, j] = 1
+
+
+@ti.kernel
+def show_tp_activated():
+    for i, j in tp:
+        tpActivated[i, j] = 1
 
 
 @ti.kernel
 def updateVariables():
-    for i, j in phiNew:
+    for i, j in phi:
         phi[i, j] = phiNew[i, j]
         tp[i, j] = tpNew[i, j]
-
-
-@ti.kernel
-def activateNeighbors():
-    """
-        activate the neighbors so that neighbors can be computed and updated
-    """    
-    for i, j in phi:
-        im, jm, ip, jp = neighbor_index(i, j)
-        mat = ti.Matrix([
-            [im, jm], [im, j], [im, jp], 
-            [i , jm],          [i , jp], 
-            [ip, jm], [ip, j], [ip, jp], 
-        ])
-        for k in ti.static(range(mat.n)):
-            phi[mat[k, 0], mat[k, 1]] = phi[mat[k, 0], mat[k, 1]]
 
 
 if __name__ == "__main__":
     
     initializeVariables()
+    gui_tpActivated = ti.GUI("temperature activated", res=(n, n))
+    gui_phiActivated = ti.GUI("phi activated", res=(n, n))
     gui_tp = ti.GUI("temperature field", res=(n, n))
     gui_phi = ti.GUI("phase field", res=(n, n))
 
     for i in range(1000000):
         
-        gui_tp.set_image(tp)
-        gui_tp.show()
-        gui_phi.set_image(phi)
-        gui_phi.show()
+        if i % 16 == 0:
+            show_tp_activated()
+            show_phi_activated()
+            gui_tpActivated.set_image(tpActivated)
+            gui_tpActivated.show()
+            gui_phiActivated.set_image(phiActivated)
+            gui_phiActivated.show()
+
+            gui_tp.set_image(tp)
+            gui_tp.show()
+            gui_phi.set_image(phi)
+            gui_phi.show()
         
-        activateNeighbors()
+        tp_activate_neighbors()
+        phi_activate_neighbors()
+
         get_epsilons_and_dEnergy_dGrad_term1()
         evolution()
         updateVariables()

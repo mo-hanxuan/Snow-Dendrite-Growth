@@ -170,11 +170,15 @@ if __name__ == "__main__":
     gui2 = ti.GUI("temperature field", res=(n, n))
 
     for i in range(1000000):
-        gui1.set_image(phi)
-        gui1.show()
+
+        if i % 16 == 0:
+            gui1.set_image(phi)
+            gui1.show()
+            gui2.set_image(tp)
+            gui2.show()
+        
         get_gradient_and_laplacian()
         evolution()
         updateVariables()
-        gui2.set_image(tp)
-        gui2.show()
+
 

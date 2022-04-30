@@ -1,11 +1,17 @@
+"""
+    use autoGrad to compute derivative of energy
+"""
+
 import taichi as ti
 import numpy as np
 
 ti.init(arch=ti.gpu)
 
 n = 512
-phi = ti.field(dtype=float, shape=(n, n))
+phi = ti.field(dtype=float, shape=(n, n), needs_grad=True)
+phiGrad = ti.Vector.field(2, ti.float64, (n, n), needs_grad=True)
 phiNew = ti.field(dtype=float, shape=(n, n))
+U = ti.field(dtype=ti.f32, shape=(), needs_grad=True)  # potential energy
 
 k = 64.  # gradient energy coefficient
 u = 8. # chemical energy coefficient
@@ -46,20 +52,29 @@ def neighbor_index(i, j):
     return im, jm, ip, jp
 
 
-@ti.func
-def laplacian(i, j):
-    im, jm, ip, jp = neighbor_index(i, j)
-    return (phi[ip, j] + phi[im, j] - 2 * phi[i, j]) / dx ** 2 + \
-           (phi[i, jp] + phi[i, jm] - 2 * phi[i, j]) / dy ** 2
+@ti.kernel
+def compute_phiGrad():
+    for i, j in phi:
+        im, jm, ip, jp = neighbor_index(i, j)
+        phiGrad[i, j][0] = (phi[ip, j] - phi[im, j]) / (2. * dx)
+        phiGrad[i, j][1] = (phi[i, jp] - phi[i, jm]) / (2. * dy)
+
+
+@ti.kernel
+def compute_U():  # compute the total energy
+    for i, j in phi:
+        U[None] += u * phi[i, j] * (1. - phi[i, j]) + \
+                   k * sumVec(phiGrad[i, j]**2)
 
 
 @ti.kernel
 def evolution():
     for i, j in phi:
-        chemicalForce = u * (1. - 2. * phi[i, j])
-        gradientForce = -k * laplacian(i, j)
-        force = chemicalForce + gradientForce
-        phi1 = phi[i, j] - mo * force * dt
+        im, jm, ip, jp = neighbor_index(i, j)
+        chemmicalForce = -phi.grad[i, j]
+        gradientForce = (phiGrad.grad[ip, j][0] - phiGrad.grad[im, j][0]) / (2. * dx) + \
+                        (phiGrad.grad[i, jp][1] - phiGrad.grad[i, jm][1]) / (2. * dy)
+        phi1 = phi[i, j] + mo * (chemmicalForce + gradientForce) * dt
         if phi1 > 1:
             phi1 = 1
         elif phi1 < 0:
@@ -73,14 +88,22 @@ def copyPhi():
         phi[i, j] = phiNew[i, j]
 
 
+def substeps():
+    compute_phiGrad()
+    with ti.Tape(loss=U):
+        compute_U(
+        )  # The tape will automatically compute dU/dx and save the results in x.grad
+    evolution()
+    copyPhi()
+
+
 if __name__ == "__main__":
 
     initializePhi()
     gui = ti.GUI("phase field", res=(n, n))
     
     for i in range(1000000):
-        evolution()
-        copyPhi()
+        substeps()
 
         if i % 16 == 0:
             gui.set_image(phi)
