@@ -12,7 +12,7 @@ import numpy as np
 
 ti.init(arch=ti.cuda)
 
-n = 1024
+n = 512
 phi = ti.field(dtype=ti.float64, shape=(n, n))
 phiNew = ti.field(dtype=ti.float64, shape=(n, n))
 tp = ti.field(dtype=ti.float64, shape=(n, n))  # temperature
@@ -34,6 +34,8 @@ gamma = 10.0
 teq = 1.0  # temperature of equilibrium
 mo = 1. / tau  # mobility
 angle0 = 0.  # np.pi / 18. * 1.5
+showFrameFrequency = 16
+writeImages = input("\033[35;1m write the output images as files? (y/n): \033[0m")
 
 
 @ti.func
@@ -146,6 +148,12 @@ def updateVariables():
         tp[i, j] = tpNew[i, j]
 
 
+def substeps():
+    get_epsilons_and_dEnergy_dGrad_term1()
+    evolution()
+    updateVariables()
+
+
 if __name__ == "__main__":
     
     initializeVariables()
@@ -154,14 +162,14 @@ if __name__ == "__main__":
 
     for i in range(1000000):
         
-        if i % 16 == 0:
+        if i % showFrameFrequency == 0:
             gui_tp.set_image(tp)
             gui_tp.show()
             gui_phi.set_image(phi)
-            gui_phi.show()
-        
-        get_epsilons_and_dEnergy_dGrad_term1()
-        evolution()
-        updateVariables()
-
-
+            gui_phi.show(
+                "./pictures/{}.png".format(i) 
+                    if i % (showFrameFrequency * 16) == 0 and writeImages == "y" 
+                    else None
+            )
+    
+        substeps()
