@@ -167,8 +167,8 @@ if __name__ == "__main__":
             gui_tp.show()
             gui_phi.set_image(phi)
             gui_phi.show(
-                "./pictures/{}.png".format(i) 
-                    if i % (showFrameFrequency * 16) == 0 and writeImages == "y" 
+                "./pictures/makeGif/{}.png".format(i) 
+                    if i % (showFrameFrequency * 2) == 0 and writeImages == "y" 
                     else None
             )
     
