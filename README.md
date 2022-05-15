@@ -2,7 +2,7 @@
 
 **Coupling phase field (PF) and temperature field to simulation the snow growth.** Fast **parallel computing** of partial differential equation (PDE) by **taichi**. 
 
-<img src="README.assets/4096.png" style="zoom:62%;" /><img src="README.assets/snow_512x512.gif" alt="snow_animation" style="zoom:62%;" />
+<img src="README.assets/4096.png" style="zoom:32%;" /><img src="README.assets/snow_512x512.gif" alt="snow_animation" style="zoom:32%;" />
 
 ## Basic ideas
 
