@@ -9,6 +9,8 @@
 
 import taichi as ti
 import numpy as np
+import os
+os.system("")
 
 ti.init(arch=ti.cuda)
 
@@ -28,12 +30,12 @@ epsilonbar = 0.005  # 0.005 gradient energy coefficient
 mu = 1.0
 k = 1.5   # 1.5 latent heat coefficient
 delta = 0.12  # 0.02 the strength of anisotropy
-anisoMod = 6.   # mode number of anisotropy
+anisoMod = 6   # mode number of anisotropy
 alpha = 0.9 / np.pi  # 0.9 
 gamma = 10.0
 teq = 1.0  # temperature of equilibrium
 mo = 1. / tau  # mobility
-angle0 = 0.  # np.pi / 18. * 1.5
+angle0 = 0.  # np.pi/4.
 showFrameFrequency = 16
 writeImages = input("\033[35;1m write the output images as files? (y/n): \033[0m")
 
@@ -160,6 +162,14 @@ if __name__ == "__main__":
     gui_tp = ti.GUI("temperature field", res=(n, n))
     gui_phi = ti.GUI("phase field", res=(n, n))
 
+    path = "./pictures/{}x{}_{}axies_{}degrees/".format(n, n, anisoMod, angle0)
+    if not os.path.exists(path):
+        os.makedirs(path)
+    
+    print("\033[35;1m {} \033[40;36;1m{}\033[0m\n".format(
+        "output files of pictures will be written to this path -> \n", path
+    ))
+
     for i in range(1000000):
         
         if i % showFrameFrequency == 0:
@@ -167,7 +177,7 @@ if __name__ == "__main__":
             gui_tp.show()
             gui_phi.set_image(phi)
             gui_phi.show(
-                "./pictures/makeGif/{}.png".format(i) 
+                path + "{}.png".format(i) 
                     if i % (showFrameFrequency * 2) == 0 and writeImages == "y" 
                     else None
             )
